@@ -48,6 +48,7 @@ model:
     hidden_dim: 128 # T4: 128 (reduced for memory)
     n_layers: 4 # T4: 4 layers
     edge_cutoff: 5.0 # CRITICAL: 5.0 (not 10.0) for T4 memory
+    edge_dim: 16 # FIX Issue 15: Add edge feature dimension
     attention_heads: 4
     dropout: 0.1
 

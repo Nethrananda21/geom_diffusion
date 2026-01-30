@@ -49,6 +49,7 @@ model:
     hidden_dim: 256 # A100: 256 (full model)
     n_layers: 8 # A100: 6-8 layers
     edge_cutoff: 8.0 # Can safely use larger cutoff
+    edge_dim: 16 # FIX Issue 15: Add edge feature dimension
     attention_heads: 8
     dropout: 0.1
 

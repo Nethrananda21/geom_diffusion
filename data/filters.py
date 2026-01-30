@@ -122,11 +122,18 @@ class QualityFilter:
         """
         return num_atoms <= self.config.pocket_atoms_max
     
-    def filter_steric_clashes(self, coords: np.ndarray) -> bool:
+    def filter_steric_clashes(
+        self, 
+        coords: np.ndarray,
+        bond_pairs: Optional[np.ndarray] = None  # FIX Issue 12: Exclude bonded atoms
+    ) -> bool:
         """
         Filter molecules with steric clashes.
         
         Atoms closer than 0.8Å indicate structure errors or failed minimization.
+        
+        FIX Issue 12: Bonded atoms (1-2) and 1-3 pairs are naturally close
+        and should NOT be flagged as clashes.
         """
         if len(coords) < 2:
             return True
@@ -135,8 +142,20 @@ class QualityFilter:
         diff = coords[:, np.newaxis, :] - coords[np.newaxis, :, :]
         dists = np.sqrt(np.sum(diff ** 2, axis=-1))
         
-        # Get minimum non-self distance
+        # Mask diagonal (self-distances)
         np.fill_diagonal(dists, np.inf)
+        
+        # FIX Issue 12: Mask bonded pairs (they're expected to be close)
+        if bond_pairs is not None and len(bond_pairs) > 0:
+            for i, j in bond_pairs:
+                dists[i, j] = np.inf
+                dists[j, i] = np.inf
+                
+                # Also mask 1-3 pairs (atoms bonded to same neighbor)
+                # This requires more complex connectivity analysis
+                # For simplicity, we only exclude direct bonds here
+        
+        # Get minimum non-bonded distance
         min_dist = np.min(dists)
         
         return min_dist >= self.config.min_interatomic_dist

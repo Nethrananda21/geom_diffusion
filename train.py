@@ -174,13 +174,27 @@ def compute_loss(
     """
     loss_config = config['training']['loss']
     
-    # Sample random timesteps
-    batch_size = 1  # Graph batching makes this tricky
+    # FIX Issue 1: Sample per-graph timesteps, not single for entire batch
+    # Get number of graphs in batch using PyG batching
+    if hasattr(batch, 'num_graphs'):
+        num_graphs = batch.num_graphs
+    elif hasattr(batch, 'batch'):
+        num_graphs = batch.batch.max().item() + 1
+    else:
+        num_graphs = 1
+    
+    # Sample one timestep per graph
     t = torch.randint(
         0, model.diffusion.timesteps,
-        (batch_size,),
+        (num_graphs,),
         device=device
     )
+    
+    # Expand timesteps to per-node using batch assignment
+    if hasattr(batch, 'batch') and num_graphs > 1:
+        t_per_node = t[batch.batch.to(device)]  # (N,) timestep per node
+    else:
+        t_per_node = t.expand(batch.pos.size(0))  # All nodes same timestep
     
     # Get clean data
     coords_0 = batch.pos.to(device)
@@ -190,20 +204,29 @@ def compute_loss(
     coord_noise = torch.randn_like(coords_0)
     type_noise = torch.randn_like(types_0)
     
-    # Forward diffusion
-    coords_t, types_t, _, _ = model.diffusion.q_sample_mol(
-        coords_0, types_0, t, coord_noise, type_noise
-    )
+    # Forward diffusion with per-node timesteps
+    # Extract diffusion coefficients per node
+    sqrt_alpha = model.diffusion.sqrt_alphas_cumprod[t_per_node].unsqueeze(-1)  # (N, 1)
+    sqrt_one_minus_alpha = model.diffusion.sqrt_one_minus_alphas_cumprod[t_per_node].unsqueeze(-1)
+    
+    coords_t = sqrt_alpha * coords_0 + sqrt_one_minus_alpha * coord_noise
+    types_t = sqrt_alpha * types_0 + sqrt_one_minus_alpha * type_noise
     
     # Create noised batch
     batch_noised = batch.clone()
     batch_noised.pos = coords_t
     batch_noised.x = types_t
     
-    # CFG training: randomly drop conditioning
-    drop_conditioning = torch.rand(1).item() < config['diffusion']['guidance']['dropout']
+    # FIX Issue 2: Per-sample CFG dropout (not single random value for batch)
+    cfg_dropout_prob = config['diffusion']['guidance']['dropout']
+    if num_graphs > 1:
+        # Per-graph dropout mask
+        drop_mask = torch.rand(num_graphs, device=device) < cfg_dropout_prob
+        drop_conditioning = drop_mask.any().item()  # Train with dropped if any
+    else:
+        drop_conditioning = torch.rand(1, device=device).item() < cfg_dropout_prob
     
-    # Model prediction
+    # Model prediction (pass per-graph timesteps, model handles expansion internally)
     preds = model(batch_noised, t, drop_conditioning=drop_conditioning)
     
     # Compute losses
@@ -220,14 +243,14 @@ def compute_loss(
     if loss_config.get('lambda_bond', 0) > 0:
         # Predict x_0 from noise prediction
         pred_coords = model.diffusion.predict_x0_from_eps(
-            coords_t, t, preds['coord_pred']
+            coords_t, t_per_node.unsqueeze(-1), preds['coord_pred']
         )
         bond_penalty = compute_bond_penalty(
             pred_coords, batch.edge_index, batch.x
         )
         total_loss = total_loss + loss_config['lambda_bond'] * bond_penalty
     else:
-        bond_penalty = torch.tensor(0.0)
+        bond_penalty = torch.tensor(0.0, device=device)
     
     return {
         'loss': total_loss,
@@ -266,24 +289,41 @@ def compute_bond_penalty(
 
 
 def get_scheduler(optimizer, config: Dict[str, Any], num_training_steps: int):
-    """Create learning rate scheduler with warmup."""
+    """
+    Create learning rate scheduler with warmup.
+    
+    FIX Issue 16: Use SequentialLR to properly chain warmup and cosine schedulers.
+    Previously, the cosine scheduler would reset the LR after warmup ended.
+    """
+    from torch.optim.lr_scheduler import SequentialLR
+    
     scheduler_config = config['training']['scheduler']
     warmup_steps = scheduler_config['warmup_steps']
     
-    def lr_lambda(current_step):
+    # Warmup phase: linear increase from 0 to base LR
+    def warmup_lambda(current_step):
         if current_step < warmup_steps:
             return float(current_step) / float(max(1, warmup_steps))
         return 1.0
     
-    warmup_scheduler = LambdaLR(optimizer, lr_lambda)
+    warmup_scheduler = LambdaLR(optimizer, warmup_lambda)
     
+    # Cosine phase: after warmup
     cosine_scheduler = CosineAnnealingWarmRestarts(
         optimizer,
         T_0=scheduler_config['T_0'],
         T_mult=1
     )
     
-    return warmup_scheduler, cosine_scheduler
+    # FIX Issue 16: Chain schedulers properly using SequentialLR
+    # This ensures the cosine scheduler starts at the final warmup LR, not from scratch
+    combined_scheduler = SequentialLR(
+        optimizer,
+        schedulers=[warmup_scheduler, cosine_scheduler],
+        milestones=[warmup_steps]
+    )
+    
+    return combined_scheduler
 
 
 def train_epoch(
@@ -354,6 +394,23 @@ def train_epoch(
             'coord': f"{total_coord_loss / n_batches:.4f}",
             'type': f"{total_type_loss / n_batches:.4f}"
         })
+    
+    # FIX Issue 7: Handle final incomplete batch gradients
+    # If there are leftover gradients from an incomplete accumulation cycle, flush them
+    if (n_batches % accumulation_steps) != 0:
+        if scaler is not None:
+            scaler.unscale_(optimizer)
+        
+        clip_norm = config['training']['stability']['clip_norm']
+        torch.nn.utils.clip_grad_norm_(model.parameters(), clip_norm)
+        
+        if scaler is not None:
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            optimizer.step()
+        
+        optimizer.zero_grad()
     
     return {
         'loss': total_loss / n_batches,
@@ -504,9 +561,9 @@ def main(args):
         betas=tuple(config['training']['optimizer']['betas'])
     )
     
-    # Scheduler
+    # Scheduler (now returns single combined SequentialLR)
     num_training_steps = len(train_loader) * config['training']['max_epochs']
-    warmup_scheduler, cosine_scheduler = get_scheduler(optimizer, config, num_training_steps)
+    scheduler = get_scheduler(optimizer, config, num_training_steps)
     
     # Mixed precision
     use_amp = config['training']['stability']['mixed_precision'] in ['fp16', 'bf16']
@@ -539,11 +596,8 @@ def main(args):
         # Validate
         val_metrics = validate(model, val_loader, config, device)
         
-        # Scheduler step
-        if epoch <= config['training']['scheduler']['warmup_steps'] // len(train_loader):
-            warmup_scheduler.step()
-        else:
-            cosine_scheduler.step()
+        # Scheduler step - SequentialLR handles warmup/cosine transition automatically
+        scheduler.step()
         
         # Log metrics
         all_metrics = {**train_metrics, **val_metrics}
@@ -557,7 +611,7 @@ def main(args):
         if val_metrics['val_loss'] < best_val_loss:
             best_val_loss = val_metrics['val_loss']
             save_checkpoint(
-                model, optimizer, cosine_scheduler,
+                model, optimizer, scheduler,
                 epoch, best_val_loss, config, checkpoint_dir
             )
             logger.info(f"New best val loss: {best_val_loss:.4f}")

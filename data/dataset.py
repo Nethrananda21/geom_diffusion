@@ -304,6 +304,17 @@ class CrossDockedDataset(Dataset):
         pocket_coords = sample['pocket_coords']
         pocket_types = sample['pocket_types']
         
+        # FIX Issue 20: Runtime assertion for pocket size limit
+        # This catches errors in preprocessing that could cause OOM
+        max_pocket = 250  # T4 hard limit
+        if self.config.filter_config and hasattr(self.config.filter_config, 'pocket_atoms_max'):
+            max_pocket = self.config.filter_config.pocket_atoms_max
+        
+        assert len(pocket_coords) <= max_pocket, (
+            f"Pocket has {len(pocket_coords)} atoms, exceeds limit of {max_pocket}. "
+            f"Re-run preprocessing with proper truncation! Sample: {sample.get('pocket_id', idx)}"
+        )
+        
         # Compute edges for ligand
         lig_edge_idx, lig_edge_dist = compute_edges(lig_coords, self.config.edge_cutoff)
         lig_edge_attr = encode_distances(lig_edge_dist, cutoff=self.config.edge_cutoff)
