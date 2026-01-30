@@ -393,7 +393,8 @@ def coords_to_mol(
             mol_copy = Chem.RWMol(mol)
             rdDetermineBonds.DetermineBonds(mol_copy, useHueckel=True)
             mol = mol_copy.GetMol()
-        except (ImportError, AttributeError):
+        except (ImportError, AttributeError, TypeError):
+            # FIX Medium #5: Added TypeError for intermediate RDKit versions
             # Method 2: Fallback - try to sanitize and assign from valence
             try:
                 # Remove all bonds and let AssignBondOrdersFromTemplate work

@@ -106,7 +106,9 @@ def encode_distances(
     """
     # RBF centers uniformly distributed
     centers = np.linspace(0, cutoff, num_rbf)
-    gamma = 1.0 / (cutoff / num_rbf)
+    # FIX Low #10: Use stable gamma calculation to avoid overflow
+    # gamma = 1 / (cutoff/num_rbf) = num_rbf / cutoff (more stable)
+    gamma = num_rbf / cutoff
     
     # Compute RBF
     diff = distances[:, np.newaxis] - centers[np.newaxis, :]
@@ -174,9 +176,12 @@ class CrossDockedDataset(Dataset):
         self.samples = self._load_or_create()
     
     def _get_cache_key(self) -> str:
-        """Generate cache key based on configuration."""
-        config_str = str(vars(self.config))
-        return hashlib.md5(config_str.encode()).hexdigest()[:8]
+        """Generate cache key based on configuration.
+        
+        FIX Medium #15: Use full 32-char hash + split name to avoid collisions.
+        """
+        config_str = f"{self.split}_{str(vars(self.config))}"
+        return hashlib.md5(config_str.encode()).hexdigest()  # Full 32 chars
     
     def _load_or_create(self) -> List[Dict]:
         """Load from cache or create dataset."""
@@ -303,6 +308,18 @@ class CrossDockedDataset(Dataset):
         lig_types = sample['ligand_types']
         pocket_coords = sample['pocket_coords']
         pocket_types = sample['pocket_types']
+        
+        # FIX Medium #14: Validate non-empty graphs
+        if len(lig_coords) == 0:
+            raise ValueError(f"Empty ligand at index {idx}, sample: {sample.get('ligand_id', 'unknown')}")
+        if len(pocket_coords) == 0:
+            raise ValueError(f"Empty pocket at index {idx}, sample: {sample.get('pocket_id', 'unknown')}")
+        
+        # FIX Medium #17: Validate coordinates are finite (no NaN/Inf)
+        if not np.isfinite(lig_coords).all():
+            raise ValueError(f"NaN/Inf in ligand coords at index {idx}")
+        if not np.isfinite(pocket_coords).all():
+            raise ValueError(f"NaN/Inf in pocket coords at index {idx}")
         
         # FIX Issue 20: Runtime assertion for pocket size limit
         # This catches errors in preprocessing that could cause OOM
