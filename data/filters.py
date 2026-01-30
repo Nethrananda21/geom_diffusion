@@ -101,7 +101,11 @@ class QualityFilter:
         Filter by crystal structure resolution.
         
         High-quality structures (< 2.5Å) have more reliable atom positions.
+        
+        FIX Bug #4: NMR structures have resolution=None, handle gracefully.
         """
+        if resolution is None:
+            return False  # Reject NMR structures (no resolution data)
         return resolution < self.config.resolution_max
     
     def filter_ligand_size(self, num_atoms: int) -> bool:

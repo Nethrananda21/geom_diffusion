@@ -99,6 +99,13 @@ class FrozenPocketEncoder(nn.Module):
         Returns:
             (M, out_dim) pocket node embeddings
         """
+        # FIX Bug #5: Ensure cache_key is hashable
+        # Lists/numpy arrays passed as batch IDs are not hashable
+        if cache_key is not None:
+            if not isinstance(cache_key, (str, int, tuple)):
+                # Convert unhashable types to string
+                cache_key = str(cache_key)
+        
         # Check cache
         if cache_key is not None and cache_key in self._cache and self._cache_enabled:
             return self._cache[cache_key]

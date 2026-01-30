@@ -41,17 +41,21 @@ class SinusoidalPositionEmbeddings(nn.Module):
             (B, dim) sinusoidal embeddings
         """
         device = t.device
+        dtype = t.dtype  # FIX Bug #7: Match input dtype for mixed precision
         half_dim = self.dim // 2
         
         # Compute embedding frequencies
         emb = math.log(10000) / (half_dim - 1)
-        emb = torch.exp(torch.arange(half_dim, device=device) * -emb)
+        emb = torch.exp(torch.arange(half_dim, device=device, dtype=dtype) * -emb)
         
         # Reshape t if needed
         if t.dim() == 0:
             t = t.unsqueeze(0)
         if t.dim() == 2:
             t = t.squeeze(-1)
+        
+        # Convert timesteps to float for embedding computation
+        t = t.to(dtype)
         
         # Compute embeddings
         emb = t[:, None] * emb[None, :]
@@ -349,17 +353,15 @@ class EGNN(nn.Module):
         # Output projections
         h_out = self.out_mlp(h)  # (N, out_node_dim) - predicts type noise
         
-        # FIX Issue 3: Predict coordinate NOISE epsilon via learned head, NOT residual
-        # The EGNN layers update coordinates, but we need to predict noise for DDPM
-        # Use coord_out to project hidden features to noise prediction scale
-        coord_scale = self.coord_out(h)  # (N, 1)
+        # FIX Bug #2: Remove random noise injection that was breaking determinism
+        # The coordinate prediction should be deterministic during training and inference
+        # Use the learned scale to modulate the coordinate change
+        coord_scale = self.coord_out(h)  # (N, 1) - learned scale factor
         
-        # Compute directional noise prediction using coordinate changes + learned scale
+        # Output: coordinate changes scaled by learned factor
+        # This predicts the noise epsilon that was added to coordinates
         coord_change = x - x_init  # (N, 3) - raw coordinate update from EGNN
-        x_out = coord_change + coord_scale * torch.randn_like(coord_change) * 0.01  # Slight regularization
-        
-        # Alternative: pure learned output (more flexible)
-        # x_out = self.coord_mlp(h)  # If we add a coord_mlp layer
+        x_out = coord_change * coord_scale  # (N, 3) - scaled prediction (NO random noise!)
         
         if return_features:
             return h_out, x_out, h

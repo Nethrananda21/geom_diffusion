@@ -99,10 +99,14 @@ class GaussianDiffusion(nn.Module):
         self.register_buffer('sqrt_alphas_cumprod', torch.sqrt(alphas_cumprod))
         self.register_buffer('sqrt_one_minus_alphas_cumprod', torch.sqrt(1 - alphas_cumprod))
         
-        # For reverse process (removing noise)
+        # FIX Bug #1: Clamp alphas_cumprod before computing reciprocals
+        # At high timesteps, alphas_cumprod can be ~1e-30, causing inf/NaN
+        alphas_cumprod_clamped = torch.clamp(alphas_cumprod, min=1e-10)
+        
+        # For reverse process (removing noise) - use clamped values
         self.register_buffer('sqrt_recip_alphas', torch.sqrt(1 / alphas))
-        self.register_buffer('sqrt_recip_alphas_cumprod', torch.sqrt(1 / alphas_cumprod))
-        self.register_buffer('sqrt_recipm1_alphas_cumprod', torch.sqrt(1 / alphas_cumprod - 1))
+        self.register_buffer('sqrt_recip_alphas_cumprod', torch.sqrt(1 / alphas_cumprod_clamped))
+        self.register_buffer('sqrt_recipm1_alphas_cumprod', torch.sqrt(1 / alphas_cumprod_clamped - 1))
         
         # Posterior mean coefficients
         posterior_mean_coef1 = betas * torch.sqrt(alphas_cumprod_prev) / (1 - alphas_cumprod)

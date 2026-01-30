@@ -19,6 +19,11 @@ from pathlib import Path
 from typing import List, Dict, Tuple, Optional, Any
 from collections import defaultdict
 
+# FIX Bug #8: Add project root to sys.path for imports when run from other directories
+_SCRIPT_DIR = Path(__file__).resolve().parent
+if str(_SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPT_DIR))
+
 import numpy as np
 import torch
 from tqdm import tqdm
