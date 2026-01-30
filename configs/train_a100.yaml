@@ -1,0 +1,119 @@
+# Production Configuration for A100 GPU (40GB/80GB VRAM)
+# Purpose: Full training to convergence for scientific results
+
+project: "geom_diffusion_sbdd"
+seed: 42
+
+data:
+  source: "CrossDocked2020"
+  root: "./data/crossdocked"
+
+  # Selection strategy (5,000 pairs for production)
+  train_pockets: 100
+  val_pockets: 20 # Held out entirely (unseen proteins)
+  test_pockets: 20 # Final evaluation only
+  ligands_per_pocket: 50 # 5,000 total for production
+
+  # Quality filters (same as debug)
+  filters:
+    rmsd_max: 1.5
+    vina_max: -6.0
+    ligand_atoms_min: 15
+    ligand_atoms_max: 45 # Can handle larger on A100
+    pocket_atoms_max: 400 # More headroom on A100
+    resolution_max: 2.5
+
+  # Stratification
+  size_distribution:
+    small_15_25: 0.30
+    medium_26_35: 0.40
+    large_36_45: 0.30
+
+  # Chemical diversity
+  diversity:
+    fingerprint: "ECFP4"
+    selection: "MaxMin"
+    tanimoto_cutoff: 0.8
+    required_elements: ["F", "Cl", "Br", "S"]
+
+  # Preprocessing
+  pocket_radius: 6.0
+  centering: "center_of_mass"
+  remove_hydrogens: true
+
+model:
+  type: "EquivariantDiffusion"
+
+  # EGNN architecture (A100 full capacity)
+  egnn:
+    hidden_dim: 256 # A100: 256 (full model)
+    n_layers: 8 # A100: 6-8 layers
+    edge_cutoff: 8.0 # Can safely use larger cutoff
+    attention_heads: 8
+    dropout: 0.1
+
+  # Pocket encoding optimization
+  pocket_encoder:
+    n_layers: 3 # Slightly deeper for production
+    freeze: true
+
+  # Features
+  atom_types: ["C", "N", "O", "F", "P", "S", "Cl", "Br", "I", "H"]
+  node_feat_dim: 128
+  time_emb_dim: 128
+
+diffusion:
+  type: "DDPM"
+  timesteps: 1000 # A100: 1000 timesteps
+  schedule: "cosine"
+  beta_start: 0.0001
+  beta_end: 0.02
+  parameterization: "eps"
+
+  # Classifier-free guidance
+  guidance:
+    dropout: 0.1
+    scale: 2.0
+
+training:
+  batch_size: 32 # A100: Large batch (no accumulation)
+  gradient_accumulation_steps: 1
+  max_epochs: 200
+
+  optimizer:
+    type: "AdamW"
+    lr: 1.0e-4
+    weight_decay: 1.0e-12
+    betas: [0.9, 0.999]
+
+  scheduler:
+    type: "CosineAnnealingWarmRestarts"
+    warmup_steps: 2000
+    T_0: 20
+
+  loss:
+    lambda_pos: 1.0
+    lambda_type: 0.5
+    lambda_bond: 0.1
+
+  stability:
+    clip_norm: 1.0
+    mixed_precision: "bf16" # A100: bf16 (better precision)
+    detect_anomaly: false
+    compile: true # PyTorch 2.0 compilation
+
+hardware:
+  device: "cuda"
+  gpu_type: "A100"
+  num_workers: 8
+  pin_memory: true
+
+evaluation:
+  metrics: ["validity", "uniqueness", "novelty", "qed", "sa_score", "vina"]
+  docking:
+    tool: "QuickVina2"
+    exhaustiveness: 16 # Higher exhaustiveness for production
+  generation:
+    num_samples: 500
+    sanitize: true
+    relax: true # MMFF94 relaxation for final candidates

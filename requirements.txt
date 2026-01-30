@@ -1,0 +1,38 @@
+# Core dependencies for Geometry-Complete Equivariant Diffusion
+# Install with: pip install -r requirements.txt
+
+# Deep Learning
+torch>=2.0.1
+torch-geometric>=2.3.0
+torch-scatter>=2.1.0
+torch-sparse>=0.6.17
+
+# Chemistry
+rdkit>=2023.03.1
+
+# Data Processing
+numpy>=1.24.0
+pandas>=2.0.0
+scipy>=1.10.0
+h5py>=3.8.0
+
+# Configuration
+pyyaml>=6.0
+omegaconf>=2.3.0
+
+# Logging & Monitoring
+wandb>=0.15.0
+tqdm>=4.65.0
+
+# Clustering & Fingerprints
+scikit-learn>=1.2.0
+
+# Docking (optional - for evaluation)
+# meeko>=0.4.0  # For AutoDock Vina preparation
+
+# Visualization (optional)
+matplotlib>=3.7.0
+seaborn>=0.12.0
+
+# Testing
+pytest>=7.3.0

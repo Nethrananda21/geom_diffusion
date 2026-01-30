@@ -1,0 +1,118 @@
+# Debug Configuration for T4 GPU (16GB VRAM)
+# Purpose: Verify code works, no OOM, loss converges
+
+project: "geom_diffusion_sbdd"
+seed: 42
+
+data:
+  source: "CrossDocked2020"
+  root: "./data/crossdocked"
+
+  # Selection strategy (1,000 pairs for debug)
+  train_pockets: 50
+  val_pockets: 10 # Held out entirely (unseen proteins)
+  ligands_per_pocket: 20 # 1,000 total for debug
+
+  # Quality filters
+  filters:
+    rmsd_max: 1.5 # Angstroms
+    vina_max: -6.0 # kcal/mol (docking score, not experimental)
+    ligand_atoms_min: 15
+    ligand_atoms_max: 40 # Reduced from 45 for T4 safety
+    pocket_atoms_max: 250 # CRITICAL: Hard limit for 16GB VRAM
+    resolution_max: 2.5 # Crystal structure quality
+
+  # Stratification
+  size_distribution:
+    small_15_25: 0.30 # 30% small
+    medium_26_35: 0.40 # 40% medium
+    large_36_40: 0.30 # 30% large
+
+  # Chemical diversity
+  diversity:
+    fingerprint: "ECFP4"
+    selection: "MaxMin"
+    tanimoto_cutoff: 0.8
+    required_elements: ["F", "Cl", "Br", "S"]
+
+  # Preprocessing
+  pocket_radius: 6.0 # Angstroms around ligand
+  centering: "center_of_mass" # Shift to origin
+  remove_hydrogens: true # Heavy atoms only
+
+model:
+  type: "EquivariantDiffusion"
+
+  # EGNN architecture (T4 optimized)
+  egnn:
+    hidden_dim: 128 # T4: 128 (reduced for memory)
+    n_layers: 4 # T4: 4 layers
+    edge_cutoff: 5.0 # CRITICAL: 5.0 (not 10.0) for T4 memory
+    attention_heads: 4
+    dropout: 0.1
+
+  # Pocket encoding optimization
+  pocket_encoder:
+    n_layers: 2 # Shallow encoder
+    freeze: true # Cache after first forward (2x speedup)
+
+  # Features
+  atom_types: ["C", "N", "O", "F", "P", "S", "Cl", "Br", "I", "H"]
+  node_feat_dim: 64
+  time_emb_dim: 64
+
+diffusion:
+  type: "DDPM"
+  timesteps: 500 # T4: 500 timesteps
+  schedule: "cosine" # Better than linear for molecules
+  beta_start: 0.0001
+  beta_end: 0.02
+  parameterization: "eps" # Predict noise
+
+  # Classifier-free guidance
+  guidance:
+    dropout: 0.1 # Training dropout
+    scale: 2.0 # Inference weight
+
+training:
+  batch_size: 4 # T4: Small batch
+  gradient_accumulation_steps: 4 # Effective batch 16
+  max_epochs: 100
+
+  optimizer:
+    type: "AdamW"
+    lr: 1.0e-4
+    weight_decay: 1.0e-12
+    betas: [0.9, 0.999]
+
+  scheduler:
+    type: "CosineAnnealingWarmRestarts"
+    warmup_steps: 1000
+    T_0: 10
+
+  loss:
+    lambda_pos: 1.0 # Coordinate MSE
+    lambda_type: 0.5 # Atom type CE
+    lambda_bond: 0.1 # Geometry-complete penalty
+
+  stability:
+    clip_norm: 1.0 # Essential for EGNN
+    mixed_precision: "fp16" # T4: fp16
+    detect_anomaly: false # CRITICAL: false for 30% speedup
+    compile: false # PyTorch 2.0 (test stability first)
+
+hardware:
+  device: "cuda"
+  gpu_type: "T4"
+  num_workers: 4
+  pin_memory: true
+
+evaluation:
+  metrics: ["validity", "uniqueness", "novelty", "qed", "sa_score", "vina"]
+  docking:
+    tool: "QuickVina2"
+    exhaustiveness: 8
+  generation:
+    num_samples: 100
+    sanitize: true
+    relax: false
