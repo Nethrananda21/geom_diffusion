@@ -335,17 +335,27 @@ class GaussianDiffusion(nn.Module):
         }
     
     def _extract(self, a: Tensor, t: Tensor, x_shape: Tuple[int, ...]) -> Tensor:
-        """Extract values from schedule array for given timesteps."""
-        batch_size = t.shape[0]
+        """Extract values from schedule array for given timesteps.
         
-        # Handle both batched and non-batched cases
+        Handles both per-graph timesteps (B,) and per-node timesteps (N,).
+        """
+        # Handle scalar case
         if t.dim() == 0:
             t = t.unsqueeze(0)
         
-        out = a.gather(-1, t)
+        # Flatten t for gather (handles both (B,) and (N,) cases)
+        t_flat = t.view(-1)
+        batch_size = t_flat.shape[0]
         
-        # Reshape for broadcasting
-        return out.reshape(batch_size, *((1,) * (len(x_shape) - 1)))
+        # Gather values from schedule
+        out = a.gather(-1, t_flat)
+        
+        # Reshape for broadcasting with x_shape
+        # If x_shape is (N, D), output should be (N, 1) for broadcasting
+        if len(x_shape) == 1:
+            return out
+        else:
+            return out.view(-1, *((1,) * (len(x_shape) - 1)))
 
 
 class MolecularDiffusion(GaussianDiffusion):
