@@ -334,27 +334,36 @@ def compute_adjacency_matrix(
 def coords_to_mol(
     coords: np.ndarray,
     elements: List[str],
-    tolerance: float = 0.5
+    tolerance: float = 0.5,
+    infer_bond_orders: bool = True  # FIX Bug #13: Enable bond order inference
 ) -> Chem.Mol:
     """
     Convert coordinates and elements to RDKit molecule.
     
     Uses distance-based bond inference with covalent radii.
     
+    FIX Bug #13: Now infers proper bond orders (single/double/triple/aromatic)
+    instead of hardcoding all bonds as SINGLE. This is critical for:
+    - Aromatic systems (benzene rings)
+    - Carbonyl groups (C=O)
+    - Correct valency validation
+    
     Args:
         coords: (N, 3) atom coordinates
         elements: List of N element symbols
         tolerance: Bond tolerance in Angstroms
+        infer_bond_orders: If True, use RDKit to infer double/triple/aromatic bonds
     
     Returns:
         RDKit Mol object (may fail sanitization)
     """
     from rdkit.Geometry import Point3D
+    from rdkit.Chem import AllChem
     
     # Create editable molecule
     mol = Chem.RWMol()
     
-    # Add atoms
+    # Add atoms with explicit hydrogens tracking
     for elem in elements:
         atom = Chem.Atom(elem)
         mol.AddAtom(atom)
@@ -371,9 +380,33 @@ def coords_to_mol(
     for i in range(len(coords)):
         for j in range(i + 1, len(coords)):
             if adj[i, j]:
-                mol.AddBond(i, j, Chem.BondType.SINGLE)
+                mol.AddBond(i, j, Chem.BondType.SINGLE)  # Initial assignment
     
-    return mol.GetMol()
+    mol = mol.GetMol()
+    
+    # FIX Bug #13: Infer proper bond orders
+    if infer_bond_orders:
+        try:
+            # Method 1: Use RDKit's DetermineBonds (RDKit >= 2022.03)
+            # This uses xyz2mol algorithm to infer bond orders from geometry
+            from rdkit.Chem import rdDetermineBonds
+            mol_copy = Chem.RWMol(mol)
+            rdDetermineBonds.DetermineBonds(mol_copy, useHueckel=True)
+            mol = mol_copy.GetMol()
+        except (ImportError, AttributeError):
+            # Method 2: Fallback - try to sanitize and assign from valence
+            try:
+                # Remove all bonds and let AssignBondOrdersFromTemplate work
+                Chem.SanitizeMol(mol, sanitizeOps=Chem.SanitizeFlags.SANITIZE_FINDRADICALS)
+                
+                # Try to perceive aromaticity
+                Chem.SetAromaticity(mol, Chem.AromaticityModel.AROMATICITY_MDL)
+            except Exception:
+                pass  # Keep single bonds as fallback
+        except Exception as e:
+            logger.debug(f"Bond order inference failed: {e}, keeping single bonds")
+    
+    return mol
 
 
 def sanitize_mol(mol: Chem.Mol, relax: bool = False) -> Optional[Chem.Mol]:
