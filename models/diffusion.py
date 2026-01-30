@@ -479,8 +479,18 @@ class MolecularDiffusion(GaussianDiffusion):
                 
                 # Classifier-free guidance
                 if guidance_scale > 1.0:
+                    # FIX Bug #3: Unconditional pass needs dummy pocket data, not missing args
+                    # Create zeroed pocket tensors with same shapes as conditional
+                    pocket_h_uncond = torch.zeros_like(pocket_data['pocket_h'])
+                    pocket_x_uncond = torch.zeros_like(pocket_data['pocket_x'])
+                    # Pass the same edge structure but zeroed features
                     type_pred_uncond, coord_pred_uncond = model(
-                        types, coords, t_batch
+                        types, coords, t_batch,
+                        pocket_h=pocket_h_uncond,
+                        pocket_x=pocket_x_uncond,
+                        pocket_edge_index=pocket_data['pocket_edge_index'],
+                        pocket_edge_attr=pocket_data.get('pocket_edge_attr'),
+                        pocket_id=None  # Don't cache unconditional
                     )
                     type_pred = type_pred_uncond + guidance_scale * (type_pred - type_pred_uncond)
                     coord_pred = coord_pred_uncond + guidance_scale * (coord_pred - coord_pred_uncond)

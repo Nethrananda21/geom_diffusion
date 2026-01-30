@@ -268,20 +268,27 @@ def compute_bond_penalty(
     tolerance: float = 0.3
 ) -> torch.Tensor:
     """
-    Penalty for unrealistic bond lengths.
+    Penalty for unrealistic inter-atomic distances.
     
-    Encourages generated structures to have reasonable geometry.
+    NOTE: This uses kNN/distance-based edges, NOT true chemical bonds.
+    This is intentional for regularization: encourages locally reasonable geometry.
+    For true bond-only penalty, pass actual bond edges from molecule connectivity.
+    
+    FIX Bug #6: Renamed from "bond penalty" to clarify it's distance-based.
+    The penalty is still useful for geometric regularization but users should
+    be aware it applies to all nearby atom pairs.
     """
     if edge_index.size(1) == 0:
         return torch.tensor(0.0, device=coords.device)
     
     row, col = edge_index
     
-    # Compute bond lengths
+    # Compute pairwise distances
     bond_vectors = coords[row] - coords[col]
     bond_lengths = torch.norm(bond_vectors, dim=-1)
     
-    # Penalty for bonds outside tolerance
+    # Penalty for distances outside reasonable range (0.8 to 2.5 Å for most atoms)
+    # This prevents steric clashes and overly stretched geometries
     penalty = F.relu(bond_lengths - target_length - tolerance) ** 2
     penalty = penalty + F.relu(target_length - tolerance - bond_lengths) ** 2
     
