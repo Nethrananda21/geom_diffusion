@@ -198,21 +198,52 @@ class CrossDockedDataset(Dataset):
     
     def _create_dataset(self) -> List[Dict]:
         """
-        Create dataset from raw data.
+        Load dataset from preprocessed .pkl files.
         
-        NOTE: This is a placeholder. In production, you would:
-        1. Load CrossDocked2020 from disk
-        2. Apply quality filters
-        3. Select diverse ligands per pocket
-        4. Process and cache
+        Expected files (created by preprocess_crossdocked.py):
+        - {root}/train_data.pkl
+        - {root}/val_data.pkl
+        
+        If processed files don't exist, falls back to synthetic data for testing.
         """
-        # Placeholder for demonstration
-        # In real implementation, load from self.config.root
-        logger.warning("Using placeholder data - implement real data loading")
+        # Try to load preprocessed data
+        processed_path = Path(self.config.root) / f"{self.split}_data.pkl"
+        
+        if processed_path.exists():
+            logger.info(f"Loading preprocessed data from {processed_path}")
+            with open(processed_path, 'rb') as f:
+                samples = pickle.load(f)
+            logger.info(f"Loaded {len(samples)} samples for {self.split} split")
+            return samples
+        
+        # Fallback: Check for alternative path structure
+        alt_path = Path(self.config.root) / "processed" / f"{self.split}_data.pkl"
+        if alt_path.exists():
+            logger.info(f"Loading preprocessed data from {alt_path}")
+            with open(alt_path, 'rb') as f:
+                samples = pickle.load(f)
+            logger.info(f"Loaded {len(samples)} samples for {self.split} split")
+            return samples
+        
+        # No preprocessed data found - generate synthetic for code testing only
+        logger.warning(
+            f"\n{'='*60}\n"
+            f"⚠️  USING SYNTHETIC PLACEHOLDER DATA\n"
+            f"    No preprocessed data found at:\n"
+            f"    - {processed_path}\n"
+            f"    - {alt_path}\n"
+            f"\n"
+            f"    Run preprocessing first:\n"
+            f"    python preprocess_crossdocked.py \\\n"
+            f"        --data_dir /path/to/crossdocked2020 \\\n"
+            f"        --output_dir {self.config.root} \\\n"
+            f"        --config configs/debug_t4.yaml\n"
+            f"{'='*60}\n"
+        )
         
         samples = []
         
-        # Generate synthetic data for code validation
+        # Generate synthetic data for code validation only
         n_pockets = {
             "train": self.config.train_pockets,
             "val": self.config.val_pockets,
@@ -228,7 +259,10 @@ class CrossDockedDataset(Dataset):
                 lig_types[np.arange(n_lig_atoms), np.random.randint(0, 6, n_lig_atoms)] = 1
                 
                 # Random pocket (100-250 atoms)
-                n_pocket_atoms = np.random.randint(100, min(251, self.config.filter_config.pocket_atoms_max + 1) if self.config.filter_config else 251)
+                max_pocket = 250
+                if self.config.filter_config and hasattr(self.config.filter_config, 'pocket_atoms_max'):
+                    max_pocket = min(250, self.config.filter_config.pocket_atoms_max)
+                n_pocket_atoms = np.random.randint(100, max_pocket + 1)
                 pocket_coords = np.random.randn(n_pocket_atoms, 3).astype(np.float32) * 10
                 pocket_types = np.zeros((n_pocket_atoms, 10), dtype=np.float32)
                 pocket_types[np.arange(n_pocket_atoms), np.random.randint(0, 6, n_pocket_atoms)] = 1

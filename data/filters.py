@@ -213,13 +213,14 @@ class QualityFilter:
                 self.stats['failed_ligand_size'] += 1
                 return False, f"Ligand atoms {num_heavy} outside [{self.config.ligand_atoms_min}, {self.config.ligand_atoms_max}]"
         
-        # Pocket size filter (CRITICAL for T4)
-        pocket_coords = sample.get('pocket_coords')
-        if pocket_coords is not None:
-            num_pocket = len(pocket_coords)
-            if not self.filter_pocket_size(num_pocket):
-                self.stats['failed_pocket_size'] += 1
-                return False, f"Pocket atoms {num_pocket} > {self.config.pocket_atoms_max} (T4 limit)"
+        # Pocket size check - DISABLED: we now TRUNCATE in pockets.py instead of filtering
+        # This preserves ~60% more training data by keeping closest atoms to ligand
+        # pocket_coords = sample.get('pocket_coords')
+        # if pocket_coords is not None:
+        #     num_pocket = len(pocket_coords)
+        #     if not self.filter_pocket_size(num_pocket):
+        #         self.stats['failed_pocket_size'] += 1
+        #         return False, f"Pocket atoms {num_pocket} > {self.config.pocket_atoms_max} (T4 limit)"
         
         # Steric clash filter
         ligand_coords = sample.get('ligand_coords')

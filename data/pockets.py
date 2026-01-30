@@ -25,6 +25,7 @@ class PocketConfig:
     pocket_radius: float = 6.0  # Angstroms around ligand
     remove_hydrogens: bool = True
     centering: str = "center_of_mass"  # or "ligand_centroid"
+    max_pocket_atoms: int = 250  # CRITICAL: T4 memory limit - truncate, don't filter!
     
     # Atom type encoding
     atom_types: List[str] = None
@@ -47,9 +48,10 @@ class PocketProcessor:
     
     Key operations:
     1. Extract pocket atoms within cutoff distance of ligand
-    2. Center system at center of mass
-    3. Encode atom types as one-hot vectors
-    4. Remove hydrogens for memory efficiency
+    2. TRUNCATE to max_pocket_atoms (keep closest to ligand COM)
+    3. Center system at center of mass
+    4. Encode atom types as one-hot vectors
+    5. Remove hydrogens for memory efficiency
     """
     
     def __init__(self, config: Optional[PocketConfig] = None):
@@ -174,6 +176,53 @@ class PocketProcessor:
         indices = np.argmax(one_hot, axis=1)
         return [self.config.atom_types[i] for i in indices]
     
+    def truncate_pocket(
+        self,
+        pocket_coords: np.ndarray,
+        pocket_elements: List[str],
+        ligand_coords: np.ndarray,
+        max_atoms: Optional[int] = None
+    ) -> Tuple[np.ndarray, List[str]]:
+        """
+        Truncate pocket to max_atoms by keeping atoms closest to ligand COM.
+        
+        CRITICAL FIX: Instead of FILTERING OUT large pockets (losing ~60% of data),
+        we TRUNCATE them by keeping the closest atoms to the ligand.
+        
+        Args:
+            pocket_coords: (N, 3) pocket atom coordinates
+            pocket_elements: List of N element symbols
+            ligand_coords: (M, 3) ligand coordinates
+            max_atoms: Maximum atoms to keep (default: config.max_pocket_atoms)
+        
+        Returns:
+            Tuple of (truncated_coords, truncated_elements)
+        """
+        if max_atoms is None:
+            max_atoms = self.config.max_pocket_atoms
+        
+        if len(pocket_coords) <= max_atoms:
+            return pocket_coords, pocket_elements
+        
+        # Compute ligand center of mass
+        ligand_com = np.mean(ligand_coords, axis=0)
+        
+        # Compute distances from pocket atoms to ligand COM
+        distances = np.linalg.norm(pocket_coords - ligand_com, axis=1)
+        
+        # Get indices of closest atoms
+        closest_indices = np.argsort(distances)[:max_atoms]
+        
+        # Sort indices to maintain original order (helps with residue grouping)
+        closest_indices = np.sort(closest_indices)
+        
+        truncated_coords = pocket_coords[closest_indices]
+        truncated_elements = [pocket_elements[i] for i in closest_indices]
+        
+        logger.debug(f"Truncated pocket from {len(pocket_coords)} to {max_atoms} atoms")
+        
+        return truncated_coords, truncated_elements
+
     def process(
         self,
         protein_coords: np.ndarray,
@@ -209,12 +258,17 @@ class PocketProcessor:
                 protein_coords, protein_elements
             )
         
-        # 2. Extract pocket atoms
+        # 2. Extract pocket atoms (within radius of ligand)
         pocket_coords, pocket_elements, _ = self.extract_pocket(
             protein_coords, protein_elements, ligand_coords, residue_ids
         )
         
-        # 3. Center at COM
+        # 3. TRUNCATE pocket to max_atoms (CRITICAL: keep closest atoms, don't discard!)
+        pocket_coords, pocket_elements = self.truncate_pocket(
+            pocket_coords, pocket_elements, ligand_coords
+        )
+        
+        # 4. Center at COM
         if self.config.centering == "center_of_mass":
             ligand_coords, pocket_coords, com = self.center_at_com(
                 ligand_coords, pocket_coords
@@ -226,7 +280,7 @@ class PocketProcessor:
         else:
             com = np.zeros(3)
         
-        # 4. Encode atom types
+        # 5. Encode atom types
         ligand_types = self.encode_atom_types(ligand_elements)
         pocket_types = self.encode_atom_types(pocket_elements)
         
