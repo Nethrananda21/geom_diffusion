@@ -194,13 +194,16 @@ class EGNN_Layer(nn.Module):
         coord_update = coord_diff * coord_weights  # (E, 3)
         
         # Aggregate coordinate updates
+        # FIX: Ensure dtype consistency for mixed precision
         x_out = x.clone()
-        x_out = x_out.index_add(0, row, coord_update * self.coords_weight)
+        coord_weighted = (coord_update * self.coords_weight).to(x_out.dtype)
+        x_out = x_out.index_add(0, row, coord_weighted)
         
         # === Node Update (Invariant) ===
         # Aggregate messages
+        # FIX: Ensure dtype consistency for mixed precision (Float vs Half)
         m_i = torch.zeros_like(h)
-        m_i = m_i.index_add(0, row, m_ij)
+        m_i = m_i.index_add(0, row, m_ij.to(m_i.dtype))
         
         # Update node features
         h_input = torch.cat([h, m_i], dim=-1)
