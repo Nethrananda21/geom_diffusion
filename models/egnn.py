@@ -361,6 +361,9 @@ class EGNN(nn.Module):
         # Use the learned scale to modulate the coordinate change
         coord_scale = self.coord_out(h)  # (N, 1) - learned scale factor
         
+        # FIX Bug (Dtype): Ensure coord_scale matches coordinate dtype for mixed precision
+        coord_scale = coord_scale.to(x.dtype)
+        
         # Output: coordinate changes scaled by learned factor
         # This predicts the noise epsilon that was added to coordinates
         coord_change = x - x_init  # (N, 3) - raw coordinate update from EGNN
@@ -526,12 +529,22 @@ class ConditionalEGNN(nn.Module):
                     # Encode this pocket
                     pocket_h_g = pocket_h[pocket_mask]
                     pocket_x_g = pocket_x[pocket_mask]
-                    # Get pocket edges for this graph (need to re-index)
-                    # For simplicity, re-encode with all edges (subset would be more efficient)
+                    
+                    # FIX Critical Multi-Pocket Edge Bug: Filter and re-index edges per pocket
+                    pocket_indices = pocket_mask.nonzero(as_tuple=True)[0]
+                    pocket_idx_min = pocket_indices.min().item() if len(pocket_indices) > 0 else 0
+                    pocket_idx_max = pocket_indices.max().item() if len(pocket_indices) > 0 else 0
+                    
+                    # Filter edges that belong to this pocket
+                    edge_mask = (pocket_edge_index[0] >= pocket_idx_min) & (pocket_edge_index[0] <= pocket_idx_max) & \
+                                (pocket_edge_index[1] >= pocket_idx_min) & (pocket_edge_index[1] <= pocket_idx_max)
+                    pocket_edge_index_g = pocket_edge_index[:, edge_mask] - pocket_idx_min  # Re-index to [0, num_pocket_nodes)
+                    pocket_edge_attr_g = pocket_edge_attr[edge_mask] if pocket_edge_attr is not None else None
+                    
                     pocket_emb_g = self.encode_pocket(
                         pocket_h_g, pocket_x_g, 
-                        pocket_edge_index,  # Note: edges may need filtering for multi-pocket
-                        pocket_edge_attr
+                        pocket_edge_index_g,
+                        pocket_edge_attr_g
                     )
                     if pid is not None:
                         self._pocket_cache[pid] = pocket_emb_g.detach()

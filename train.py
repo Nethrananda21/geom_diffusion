@@ -217,8 +217,11 @@ def compute_loss(
     
     # Forward diffusion with per-node timesteps
     # Extract diffusion coefficients per node
-    sqrt_alpha = model.diffusion.sqrt_alphas_cumprod[t_per_node].unsqueeze(-1)  # (N, 1)
-    sqrt_one_minus_alpha = model.diffusion.sqrt_one_minus_alphas_cumprod[t_per_node].unsqueeze(-1)
+    # FIX Device Sync Bug: Ensure schedules are on same device as timesteps
+    sqrt_alphas = model.diffusion.sqrt_alphas_cumprod.to(device)
+    sqrt_one_minus = model.diffusion.sqrt_one_minus_alphas_cumprod.to(device)
+    sqrt_alpha = sqrt_alphas[t_per_node].unsqueeze(-1)  # (N, 1)
+    sqrt_one_minus_alpha = sqrt_one_minus[t_per_node].unsqueeze(-1)
     
     coords_t = sqrt_alpha * coords_0 + sqrt_one_minus_alpha * coord_noise
     types_t = sqrt_alpha * types_0 + sqrt_one_minus_alpha * type_noise
