@@ -8,10 +8,10 @@ data:
   source: "CrossDocked2020"
   root: "./data/crossdocked"
 
-  # Selection strategy (1,000 pairs for debug)
-  train_pockets: 50
-  val_pockets: 10 # Held out entirely (unseen proteins)
-  ligands_per_pocket: 20 # 1,000 total for debug
+  # Selection strategy (5,000 pairs for testing)
+  train_pockets: 100
+  val_pockets: 20 # Held out entirely (unseen proteins)
+  ligands_per_pocket: 50 # 5,000 total for testing
 
   # Quality filters
   filters:
