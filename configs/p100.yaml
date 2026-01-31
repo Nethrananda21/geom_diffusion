@@ -1,0 +1,113 @@
+# P100 GPU Configuration (16GB VRAM)
+# Optimized to fully utilize GPU memory
+
+project: "geom_diffusion_sbdd"
+seed: 42
+
+data:
+  source: "CrossDocked2020"
+  root: "/content/data/crossdocked"
+
+  # More data for P100
+  train_pockets: 200
+  val_pockets: 40
+  ligands_per_pocket: 50
+
+  # Larger pockets for P100
+  filters:
+    rmsd_max: 1.5
+    vina_max: -6.0
+    ligand_atoms_min: 10
+    ligand_atoms_max: 60 # Larger ligands
+    pocket_atoms_max: 2000 # 2x larger than T4
+    resolution_max: 2.5
+
+  size_distribution:
+    small_15_25: 0.30
+    medium_26_35: 0.40
+    large_36_40: 0.30
+
+  diversity:
+    fingerprint: "ECFP4"
+    selection: "MaxMin"
+    tanimoto_cutoff: 0.8
+    required_elements: ["F", "Cl", "Br", "S"]
+
+  pocket_radius: 8.0 # Larger pocket radius
+  centering: "center_of_mass"
+  remove_hydrogens: true
+
+model:
+  type: "EquivariantDiffusion"
+
+  # Larger EGNN for P100
+  egnn:
+    hidden_dim: 256 # 2x larger than T4
+    n_layers: 6 # More layers
+    edge_cutoff: 6.0 # Slightly larger cutoff
+    edge_dim: 32 # More edge features
+    attention_heads: 8
+    dropout: 0.1
+
+  pocket_encoder:
+    n_layers: 3 # Deeper encoder
+    freeze: true
+
+  atom_types: ["C", "N", "O", "F", "P", "S", "Cl", "Br", "I", "H"]
+  node_feat_dim: 128 # Larger features
+  time_emb_dim: 128
+
+diffusion:
+  type: "DDPM"
+  timesteps: 1000 # More timesteps for quality
+  schedule: "cosine"
+  beta_start: 0.0001
+  beta_end: 0.02
+  parameterization: "eps"
+
+  guidance:
+    dropout: 0.1
+    scale: 2.0
+
+training:
+  batch_size: 16 # 16x larger than T4!
+  gradient_accumulation_steps: 2 # Effective batch 32
+  max_epochs: 100
+
+  optimizer:
+    type: "AdamW"
+    lr: 2.0e-4 # Slightly higher LR for larger batch
+    weight_decay: 1.0e-12
+    betas: [0.9, 0.999]
+
+  scheduler:
+    type: "CosineAnnealingWarmRestarts"
+    warmup_steps: 500
+    T_0: 10
+
+  loss:
+    lambda_pos: 1.0
+    lambda_type: 0.5
+    lambda_bond: 0.1
+
+  stability:
+    clip_norm: 1.0
+    mixed_precision: "fp16"
+    detect_anomaly: false
+    compile: false
+
+hardware:
+  device: "cuda"
+  gpu_type: "P100"
+  num_workers: 4
+  pin_memory: true
+
+evaluation:
+  metrics: ["validity", "uniqueness", "novelty", "qed", "sa_score", "vina"]
+  docking:
+    tool: "QuickVina2"
+    exhaustiveness: 8
+  generation:
+    num_samples: 100
+    sanitize: true
+    relax: false
