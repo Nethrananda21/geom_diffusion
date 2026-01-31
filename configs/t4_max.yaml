@@ -1,0 +1,111 @@
+# T4 GPU Maximum Utilization Config (15.8GB VRAM)
+# Target: Use 12-14GB VRAM for optimal training
+
+project: "geom_diffusion_sbdd"
+seed: 42
+
+data:
+  source: "CrossDocked2020"
+  root: "/content/data/crossdocked"
+
+  train_pockets: 150
+  val_pockets: 30
+  ligands_per_pocket: 50
+
+  filters:
+    rmsd_max: 1.5
+    vina_max: -6.0
+    ligand_atoms_min: 10
+    ligand_atoms_max: 50
+    pocket_atoms_max: 1500 # Larger pockets
+    resolution_max: 2.5
+
+  size_distribution:
+    small_15_25: 0.30
+    medium_26_35: 0.40
+    large_36_40: 0.30
+
+  diversity:
+    fingerprint: "ECFP4"
+    selection: "MaxMin"
+    tanimoto_cutoff: 0.8
+    required_elements: ["F", "Cl", "Br", "S"]
+
+  pocket_radius: 7.0
+  centering: "center_of_mass"
+  remove_hydrogens: true
+
+model:
+  type: "EquivariantDiffusion"
+
+  # Larger EGNN for T4 Max
+  egnn:
+    hidden_dim: 192 # Up from 128
+    n_layers: 5 # Up from 4
+    edge_cutoff: 5.5 # Slightly larger
+    edge_dim: 24 # Up from 16
+    attention_heads: 6
+    dropout: 0.1
+
+  pocket_encoder:
+    n_layers: 3
+    freeze: true
+
+  atom_types: ["C", "N", "O", "F", "P", "S", "Cl", "Br", "I", "H"]
+  node_feat_dim: 96 # Up from 64
+  time_emb_dim: 96
+
+diffusion:
+  type: "DDPM"
+  timesteps: 750 # More timesteps
+  schedule: "cosine"
+  beta_start: 0.0001
+  beta_end: 0.02
+  parameterization: "eps"
+
+  guidance:
+    dropout: 0.1
+    scale: 2.0
+
+training:
+  batch_size: 8 # 8x larger!
+  gradient_accumulation_steps: 2 # Effective batch 16
+  max_epochs: 100
+
+  optimizer:
+    type: "AdamW"
+    lr: 1.5e-4
+    weight_decay: 1.0e-12
+    betas: [0.9, 0.999]
+
+  scheduler:
+    type: "CosineAnnealingWarmRestarts"
+    warmup_steps: 500
+    T_0: 10
+
+  loss:
+    lambda_pos: 1.0
+    lambda_type: 0.5
+    lambda_bond: 0.1
+
+  stability:
+    clip_norm: 1.0
+    mixed_precision: "fp16"
+    detect_anomaly: false
+    compile: false
+
+hardware:
+  device: "cuda"
+  gpu_type: "T4"
+  num_workers: 4
+  pin_memory: true
+
+evaluation:
+  metrics: ["validity", "uniqueness", "novelty", "qed", "sa_score", "vina"]
+  docking:
+    tool: "QuickVina2"
+    exhaustiveness: 8
+  generation:
+    num_samples: 100
+    sanitize: true
+    relax: false
