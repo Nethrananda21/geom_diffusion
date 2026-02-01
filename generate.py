@@ -69,6 +69,9 @@ def generate_molecules(model, pocket_data, config, device, num_samples=10, num_a
     Returns:
         List of generated molecule data
     """
+    from torch_geometric.data import Data, Batch
+    from data.dataset import build_graph
+    
     model.eval()
     timesteps = config['diffusion']['timesteps']
     betas = get_beta_schedule(timesteps, config['diffusion'].get('schedule', 'cosine'))
@@ -80,80 +83,96 @@ def generate_molecules(model, pocket_data, config, device, num_samples=10, num_a
     alphas = torch.tensor(alphas, dtype=torch.float32, device=device)
     alphas_cumprod = torch.tensor(alphas_cumprod, dtype=torch.float32, device=device)
     
-    # Prepare pocket
+    # Prepare pocket data
     pocket_coords = torch.tensor(pocket_data['pocket_coords'], dtype=torch.float32, device=device)
     pocket_types = torch.tensor(pocket_data['pocket_types'], dtype=torch.float32, device=device)
+    n_pocket = len(pocket_coords)
     
-    # Expand for batch
-    pocket_coords = pocket_coords.unsqueeze(0).expand(num_samples, -1, -1)
-    pocket_types = pocket_types.unsqueeze(0).expand(num_samples, -1, -1)
+    # Build pocket edges (once)
+    edge_cutoff = config['model']['egnn'].get('edge_cutoff', 5.0)
+    pocket_edge_index, pocket_edge_attr = build_graph(pocket_coords.cpu().numpy(), edge_cutoff)
+    pocket_edge_index = torch.tensor(pocket_edge_index, dtype=torch.long, device=device)
+    pocket_edge_attr = torch.tensor(pocket_edge_attr, dtype=torch.float32, device=device)
     
-    # Initialize random ligand (pure noise)
-    # Start from pocket center with noise
-    pocket_center = pocket_coords.mean(dim=1, keepdim=True)
-    ligand_coords = pocket_center + torch.randn(num_samples, num_atoms, 3, device=device) * 2.0
-    ligand_types = torch.randn(num_samples, num_atoms, 10, device=device)  # 10 atom types
+    # Initialize random ligands (start from noise near pocket center)
+    pocket_center = pocket_coords.mean(dim=0)
     
     generated = []
     
-    # Reverse diffusion
-    for t in tqdm(reversed(range(timesteps)), desc="Generating", total=timesteps):
-        t_batch = torch.full((num_samples,), t, device=device, dtype=torch.long)
+    # Generate one at a time to avoid memory issues
+    for sample_idx in tqdm(range(num_samples), desc="Generating molecules"):
+        # Initialize ligand as pure noise near pocket
+        ligand_coords = pocket_center + torch.randn(num_atoms, 3, device=device) * 3.0
+        ligand_types = torch.randn(num_atoms, 10, device=device)  # 10 atom types
         
-        # Build batch for model
-        batch = {
-            'ligand_coords': ligand_coords,
-            'ligand_types': ligand_types,
-            'pocket_coords': pocket_coords,
-            'pocket_types': pocket_types,
-            'ligand_mask': torch.ones(num_samples, num_atoms, device=device),
-            'pocket_mask': torch.ones(num_samples, pocket_coords.size(1), device=device),
-        }
-        
-        # Predict noise
-        with torch.cuda.amp.autocast(enabled=True):
-            preds = model(batch, t_batch, drop_conditioning=False)
-        
-        type_pred = preds['type_pred']
-        coord_pred = preds['coord_pred']
-        
-        # Get diffusion parameters
-        alpha_t = alphas[t]
-        alpha_cumprod_t = alphas_cumprod[t]
-        beta_t = betas[t]
-        
-        if t > 0:
-            alpha_cumprod_prev = alphas_cumprod[t - 1]
+        # Reverse diffusion
+        for t in range(timesteps - 1, -1, -1):
+            # Build ligand edges
+            lig_edge_index, lig_edge_attr = build_graph(ligand_coords.cpu().numpy(), edge_cutoff)
+            lig_edge_index = torch.tensor(lig_edge_index, dtype=torch.long, device=device)
+            lig_edge_attr = torch.tensor(lig_edge_attr, dtype=torch.float32, device=device)
             
-            # Posterior mean coefficient
-            coef1 = beta_t * torch.sqrt(alpha_cumprod_prev) / (1 - alpha_cumprod_t)
-            coef2 = (1 - alpha_cumprod_prev) * torch.sqrt(alpha_t) / (1 - alpha_cumprod_t)
+            # Create PyG Data object
+            data = Data(
+                x=ligand_types,
+                pos=ligand_coords,
+                edge_index=lig_edge_index,
+                edge_attr=lig_edge_attr,
+                pocket_x=pocket_types,
+                pocket_pos=pocket_coords,
+                pocket_edge_index=pocket_edge_index,
+                pocket_edge_attr=pocket_edge_attr,
+                pocket_id=pocket_data.get('pocket_id', 'gen')
+            )
             
-            # Update coordinates
-            pred_x0_coords = (ligand_coords - torch.sqrt(1 - alpha_cumprod_t) * coord_pred) / torch.sqrt(alpha_cumprod_t)
-            mean_coords = coef1 * pred_x0_coords + coef2 * ligand_coords
+            # Create batch of 1
+            batch = Batch.from_data_list([data])
+            batch = batch.to(device)
             
-            # Add noise
-            noise = torch.randn_like(ligand_coords) * torch.sqrt(beta_t)
-            ligand_coords = mean_coords + noise
+            t_tensor = torch.tensor([t], device=device, dtype=torch.long)
             
-            # Update types similarly
-            pred_x0_types = (ligand_types - torch.sqrt(1 - alpha_cumprod_t) * type_pred) / torch.sqrt(alpha_cumprod_t)
-            mean_types = coef1 * pred_x0_types + coef2 * ligand_types
-            ligand_types = mean_types + torch.randn_like(ligand_types) * torch.sqrt(beta_t)
-        else:
-            # Final step - no noise
-            ligand_coords = (ligand_coords - torch.sqrt(1 - alpha_cumprod_t) * coord_pred) / torch.sqrt(alpha_cumprod_t)
-            ligand_types = (ligand_types - torch.sqrt(1 - alpha_cumprod_t) * type_pred) / torch.sqrt(alpha_cumprod_t)
-    
-    # Convert to molecules
-    atom_types = ['C', 'N', 'O', 'S', 'P', 'F', 'Cl', 'Br', 'I', 'Other']
-    
-    for i in range(num_samples):
-        coords = ligand_coords[i].cpu().numpy()
-        types = ligand_types[i].cpu().numpy()
+            # Predict noise
+            with torch.cuda.amp.autocast(enabled=True):
+                preds = model(batch, t_tensor, drop_conditioning=False)
+            
+            type_pred = preds['type_pred']
+            coord_pred = preds['coord_pred']
+            
+            # Get diffusion parameters
+            alpha_cumprod_t = alphas_cumprod[t]
+            beta_t = betas[t]
+            
+            if t > 0:
+                alpha_t = alphas[t]
+                alpha_cumprod_prev = alphas_cumprod[t - 1]
+                
+                # Posterior mean coefficient
+                coef1 = beta_t * torch.sqrt(alpha_cumprod_prev) / (1 - alpha_cumprod_t)
+                coef2 = (1 - alpha_cumprod_prev) * torch.sqrt(alpha_t) / (1 - alpha_cumprod_t)
+                
+                # Update coordinates
+                pred_x0_coords = (ligand_coords - torch.sqrt(1 - alpha_cumprod_t) * coord_pred) / torch.sqrt(alpha_cumprod_t)
+                mean_coords = coef1 * pred_x0_coords + coef2 * ligand_coords
+                
+                # Add noise
+                noise = torch.randn_like(ligand_coords) * torch.sqrt(beta_t)
+                ligand_coords = mean_coords + noise
+                
+                # Update types similarly
+                pred_x0_types = (ligand_types - torch.sqrt(1 - alpha_cumprod_t) * type_pred) / torch.sqrt(alpha_cumprod_t)
+                mean_types = coef1 * pred_x0_types + coef2 * ligand_types
+                ligand_types = mean_types + torch.randn_like(ligand_types) * torch.sqrt(beta_t)
+            else:
+                # Final step - no noise
+                ligand_coords = (ligand_coords - torch.sqrt(1 - alpha_cumprod_t) * coord_pred) / torch.sqrt(alpha_cumprod_t)
+                ligand_types = (ligand_types - torch.sqrt(1 - alpha_cumprod_t) * type_pred) / torch.sqrt(alpha_cumprod_t)
         
-        # Get atom types from one-hot
+        # Convert to molecule
+        atom_types = ['C', 'N', 'O', 'S', 'P', 'F', 'Cl', 'Br', 'I', 'Other']
+        coords = ligand_coords.cpu().numpy()
+        types = ligand_types.cpu().numpy()
+        
+        # Get atom types from logits
         atom_indices = types.argmax(axis=1)
         atoms = [atom_types[idx] if idx < len(atom_types) else 'C' for idx in atom_indices]
         
