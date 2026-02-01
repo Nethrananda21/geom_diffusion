@@ -39,6 +39,49 @@ def load_model(checkpoint_path, config_path, device):
     return model, config
 
 
+def build_graph(coords, cutoff=5.0):
+    """Build graph edges based on distance cutoff"""
+    from scipy.spatial.distance import cdist
+    
+    # Compute pairwise distances
+    dists = cdist(coords, coords)
+    
+    # Find edges within cutoff
+    edge_mask = (dists < cutoff) & (dists > 0.01)  # Exclude self-loops
+    src, dst = np.where(edge_mask)
+    
+    edge_index = np.stack([src, dst], axis=0)
+    
+    # Edge attributes: distances + directional info
+    edge_dists = dists[src, dst].reshape(-1, 1)
+    
+    # Direction vectors (normalized)
+    if len(src) > 0:
+        diff = coords[dst] - coords[src]
+        norms = np.linalg.norm(diff, axis=1, keepdims=True) + 1e-8
+        directions = diff / norms
+        
+        # Edge attr: [distance, dx, dy, dz, dist^2, ...]
+        edge_attr = np.concatenate([
+            edge_dists,
+            directions,
+            edge_dists ** 2,
+            np.sin(edge_dists),
+            np.cos(edge_dists),
+            np.exp(-edge_dists),
+            np.exp(-edge_dists ** 2),
+            np.ones_like(edge_dists),  # Bias term
+            edge_dists ** 3,
+            np.log(edge_dists + 1),
+            np.tanh(edge_dists),
+            np.sqrt(edge_dists),
+        ], axis=1)  # 16 features total
+    else:
+        edge_attr = np.zeros((0, 16))
+    
+    return edge_index, edge_attr
+
+
 def get_beta_schedule(timesteps, schedule='cosine'):
     """Get diffusion beta schedule"""
     if schedule == 'cosine':
@@ -70,7 +113,6 @@ def generate_molecules(model, pocket_data, config, device, num_samples=10, num_a
         List of generated molecule data
     """
     from torch_geometric.data import Data, Batch
-    from data.dataset import build_graph
     
     model.eval()
     timesteps = config['diffusion']['timesteps']
