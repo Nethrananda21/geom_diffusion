@@ -16,7 +16,7 @@ import warnings
 warnings.filterwarnings('ignore')
 
 # Import model components
-from train import DiffusionModel
+from train import GeomDiffusionModel
 
 
 def load_model(checkpoint_path, config_path, device):
@@ -25,7 +25,7 @@ def load_model(checkpoint_path, config_path, device):
         config = yaml.safe_load(f)
     
     # Build model
-    model = DiffusionModel(config).to(device)
+    model = GeomDiffusionModel(config).to(device)
     
     # Load checkpoint
     checkpoint = torch.load(checkpoint_path, map_location=device)
