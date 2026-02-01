@@ -43,7 +43,7 @@ model:
     hidden_dim: 192 # Up from 128
     n_layers: 5 # Up from 4
     edge_cutoff: 5.5 # Slightly larger
-    edge_dim: 24 # Up from 16
+    edge_dim: 16 # Must match dataset edge features
     attention_heads: 6
     dropout: 0.1
 
