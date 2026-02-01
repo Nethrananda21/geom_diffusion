@@ -40,46 +40,32 @@ def load_model(checkpoint_path, config_path, device):
 
 
 def build_graph(coords, cutoff=5.0):
-    """Build graph edges based on distance cutoff"""
+    """Build graph edges based on distance cutoff - matches dataset preprocessing"""
     from scipy.spatial.distance import cdist
     
-    # Compute pairwise distances
-    dists = cdist(coords, coords)
+    n = len(coords)
+    if n == 0:
+        return np.zeros((2, 0), dtype=np.int64), np.zeros((0, 16), dtype=np.float32)
     
-    # Find edges within cutoff
-    edge_mask = (dists < cutoff) & (dists > 0.01)  # Exclude self-loops
-    src, dst = np.where(edge_mask)
+    # Compute pairwise distances
+    distances = cdist(coords, coords)
+    
+    # Find edges within cutoff (no self-loops)
+    mask = (distances <= cutoff) & (distances > 0.01)
+    src, dst = np.where(mask)
     
     edge_index = np.stack([src, dst], axis=0)
+    edge_dists = distances[src, dst]
     
-    # Edge attributes: distances + directional info
-    edge_dists = dists[src, dst].reshape(-1, 1)
+    # RBF encoding (must match dataset.encode_distances)
+    num_rbf = 16
+    centers = np.linspace(0, cutoff, num_rbf)
+    gamma = num_rbf / cutoff
     
-    # Direction vectors (normalized)
-    if len(src) > 0:
-        diff = coords[dst] - coords[src]
-        norms = np.linalg.norm(diff, axis=1, keepdims=True) + 1e-8
-        directions = diff / norms
-        
-        # Edge attr: [distance, dx, dy, dz, dist^2, ...]
-        edge_attr = np.concatenate([
-            edge_dists,
-            directions,
-            edge_dists ** 2,
-            np.sin(edge_dists),
-            np.cos(edge_dists),
-            np.exp(-edge_dists),
-            np.exp(-edge_dists ** 2),
-            np.ones_like(edge_dists),  # Bias term
-            edge_dists ** 3,
-            np.log(edge_dists + 1),
-            np.tanh(edge_dists),
-            np.sqrt(edge_dists),
-        ], axis=1)  # 16 features total
-    else:
-        edge_attr = np.zeros((0, 16))
+    diff = edge_dists[:, np.newaxis] - centers[np.newaxis, :]
+    edge_attr = np.exp(-gamma * diff ** 2).astype(np.float32)
     
-    return edge_index, edge_attr
+    return edge_index.astype(np.int64), edge_attr
 
 
 def get_beta_schedule(timesteps, schedule='cosine'):
