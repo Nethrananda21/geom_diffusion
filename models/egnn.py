@@ -289,9 +289,11 @@ class EGNN(nn.Module):
             nn.Linear(hidden_dim, out_node_dim)
         )
         
-        # Coordinate output (scale to predict noise)
-        self.coord_out = nn.Linear(hidden_dim, 1, bias=False)
-        nn.init.zeros_(self.coord_out.weight)
+        # FIX 2.md §6: Direct coordinate noise prediction with Xavier init
+        # Previously: coord_out was 1D with zero-init, causing gradient starvation
+        self.coord_head = nn.Linear(hidden_dim, 3)
+        nn.init.xavier_uniform_(self.coord_head.weight, gain=0.01)
+        nn.init.zeros_(self.coord_head.bias)
     
     def forward(
         self,
@@ -356,18 +358,11 @@ class EGNN(nn.Module):
         # Output projections
         h_out = self.out_mlp(h)  # (N, out_node_dim) - predicts type noise
         
-        # FIX Bug #2: Remove random noise injection that was breaking determinism
-        # The coordinate prediction should be deterministic during training and inference
-        # Use the learned scale to modulate the coordinate change
-        coord_scale = self.coord_out(h)  # (N, 1) - learned scale factor
-        
-        # FIX Bug (Dtype): Ensure coord_scale matches coordinate dtype for mixed precision
-        coord_scale = coord_scale.to(x.dtype)
-        
-        # Output: coordinate changes scaled by learned factor
-        # This predicts the noise epsilon that was added to coordinates
-        coord_change = x - x_init  # (N, 3) - raw coordinate update from EGNN
-        x_out = coord_change * coord_scale  # (N, 3) - scaled prediction (NO random noise!)
+        # FIX 2.md §6: Direct noise prediction from coord_head
+        # Previously: (x - x_init) * coord_scale caused gradient starvation due to zero-init
+        # Now: coord_head directly predicts the noise ε that was added to coordinates
+        x_out = self.coord_head(h)  # (N, 3) - direct ε prediction
+        x_out = x_out.to(x.dtype)  # Ensure dtype matches for mixed precision
         
         if return_features:
             return h_out, x_out, h

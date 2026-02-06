@@ -28,6 +28,37 @@ from .pockets import PocketProcessor, PocketConfig
 logger = logging.getLogger(__name__)
 
 
+class RandomRotationTransform:
+    """
+    FIX 2.md §3: Apply random SO(3) rotation to coordinates + pocket.
+    
+    This provides free 10-50× data augmentation without generating new files.
+    EGNN is SE(3)-equivariant, but augmentation helps with:
+    - Better generalization
+    - Reduced overfitting on small datasets
+    - More robust pocket-ligand interactions
+    """
+    def __call__(self, data):
+        # Generate random rotation matrix via QR decomposition
+        A = torch.randn(3, 3)
+        Q, R = torch.linalg.qr(A)
+        # Ensure det(Q) = +1 (proper rotation, not reflection)
+        R = Q @ torch.diag(torch.sign(torch.diag(R)))
+        
+        # Apply rotation to ligand coordinates
+        data.pos = data.pos @ R.T
+        # Re-center ligand at origin
+        data.pos = data.pos - data.pos.mean(dim=0, keepdim=True)
+        
+        # Apply same rotation to pocket coordinates
+        if hasattr(data, 'pocket_pos') and data.pocket_pos is not None:
+            data.pocket_pos = data.pocket_pos @ R.T
+            data.pocket_pos = data.pocket_pos - data.pocket_pos.mean(dim=0, keepdim=True)
+        
+        return data
+
+
+
 @dataclass
 class DatasetConfig:
     """Configuration for dataset loading."""

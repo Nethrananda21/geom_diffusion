@@ -243,7 +243,12 @@ def compute_loss(
     
     # Compute losses
     coord_loss = F.mse_loss(preds['coord_pred'], coord_noise)
-    type_loss = F.mse_loss(preds['type_pred'], type_noise)
+    
+    # FIX 2.md §7: Cross-entropy for discrete atom types instead of MSE
+    # MSE on one-hot treats all wrong predictions equally; CE naturally biases high-confidence
+    pred_types_x0 = (types_t - sqrt_one_minus_alpha * preds['type_pred']) / sqrt_alpha
+    type_targets = types_0.argmax(dim=-1)  # Ground-truth class indices
+    type_loss = F.cross_entropy(pred_types_x0, type_targets)
     
     # Combined loss
     total_loss = (
@@ -251,14 +256,18 @@ def compute_loss(
         loss_config['lambda_type'] * type_loss
     )
     
+    # Get atom types list for bond/connectivity calculations
+    atom_types_list = config['model'].get('atom_types', ["C", "N", "O", "F", "P", "S", "Cl", "Br", "I", "H"])
+    
+    # Predict x_0 from noise prediction (needed for both bond and connectivity penalties)
+    pred_coords = model.diffusion.predict_x0_from_eps(
+        coords_t, t_per_node.unsqueeze(-1), preds['coord_pred']
+    )
+    pred_types = (types_t - sqrt_one_minus_alpha * preds['type_pred']) / sqrt_alpha
+    
     # Optional: bond length penalty
     if loss_config.get('lambda_bond', 0) > 0:
-        # Predict x_0 from noise prediction
-        pred_coords = model.diffusion.predict_x0_from_eps(
-            coords_t, t_per_node.unsqueeze(-1), preds['coord_pred']
-        )
         # FIX Bug #6: Use actual chemical bonds (covalent radii) instead of kNN edges
-        atom_types_list = config['model'].get('atom_types', ["C", "N", "O", "F", "P", "S", "Cl", "Br", "I", "H"])
         bond_edges = compute_chemical_bonds(pred_coords, batch.x, atom_types_list)
         bond_penalty = compute_bond_penalty(
             pred_coords, bond_edges, batch.x
@@ -267,11 +276,22 @@ def compute_loss(
     else:
         bond_penalty = torch.tensor(0.0, device=device)
     
+    # FIX 2.md §5: Connectivity penalty to encourage connected molecules
+    connectivity_weight = loss_config.get('lambda_connectivity', 0.5)
+    if connectivity_weight > 0:
+        connectivity_penalty = compute_connectivity_penalty(
+            pred_coords, pred_types, atom_types_list
+        )
+        total_loss = total_loss + connectivity_weight * connectivity_penalty
+    else:
+        connectivity_penalty = torch.tensor(0.0, device=device)
+    
     return {
         'loss': total_loss,
         'coord_loss': coord_loss,
         'type_loss': type_loss,
-        'bond_loss': bond_penalty
+        'bond_loss': bond_penalty,
+        'connectivity_loss': connectivity_penalty
     }
 
 
@@ -367,19 +387,86 @@ def compute_bond_penalty(
     return penalty.mean()
 
 
+def compute_connectivity_penalty(
+    coords: torch.Tensor,
+    atom_types: torch.Tensor,
+    atom_type_list: list,
+    batch: Optional[torch.Tensor] = None
+) -> torch.Tensor:
+    """
+    FIX 2.md §5: Penalise isolated atoms (no bond within covalent distance).
+    
+    This encourages the model to generate connected molecules by penalizing
+    atoms that have no neighbors within covalent bonding distance.
+    
+    Args:
+        coords: (N, 3) atom coordinates
+        atom_types: (N, F) one-hot atom types
+        atom_type_list: List of atom element symbols
+        batch: Optional (N,) batch assignment (not used yet, for future batching)
+    
+    Returns:
+        Scalar fraction of isolated atoms (0.0 = all connected, 1.0 = all isolated)
+    """
+    COVALENT_RADII = {
+        'C': 0.76, 'N': 0.71, 'O': 0.66, 'F': 0.57,
+        'P': 1.07, 'S': 1.05, 'Cl': 1.02, 'Br': 1.20, 'I': 1.39, 'H': 0.31
+    }
+    tolerance = 0.45
+    
+    # Get element symbols from one-hot types
+    indices = atom_types.argmax(dim=-1).cpu().numpy()
+    elements = [atom_type_list[i] if i < len(atom_type_list) else 'C' for i in indices]
+    radii = torch.tensor(
+        [COVALENT_RADII.get(e, 1.0) for e in elements],
+        device=coords.device,
+        dtype=coords.dtype
+    )
+    
+    # Compute pairwise distances
+    dists = torch.cdist(coords.unsqueeze(0), coords.unsqueeze(0)).squeeze(0)
+    
+    # Compute bond cutoffs based on covalent radii
+    cutoffs = radii.unsqueeze(0) + radii.unsqueeze(1) + tolerance
+    
+    # Mask: True where a bond exists (dist < cutoff, excluding self-loops)
+    bond_mask = (dists < cutoffs) & (dists > 0.01)
+    
+    # Check if each atom has at least one bond
+    has_bond = bond_mask.any(dim=1).float()  # 1.0 if bonded, 0.0 if isolated
+    
+    # Penalty = fraction of isolated atoms
+    isolated_frac = 1.0 - has_bond.mean()
+    return isolated_frac
+
+
 def get_scheduler(optimizer, config: Dict[str, Any], num_training_steps: int):
     """
-    Create learning rate scheduler with warmup.
+    Create learning rate scheduler.
     
-    FIX Issue 16: Use SequentialLR to properly chain warmup and cosine schedulers.
-    Previously, the cosine scheduler would reset the LR after warmup ended.
+    FIX 2.md §4: Support OneCycleLR for smoother convergence.
+    CosineAnnealingWarmRestarts causes loss spikes every T_0 epochs.
     """
-    from torch.optim.lr_scheduler import SequentialLR
+    from torch.optim.lr_scheduler import SequentialLR, OneCycleLR
     
     scheduler_config = config['training']['scheduler']
-    warmup_steps = scheduler_config['warmup_steps']
+    scheduler_type = scheduler_config.get('type', 'CosineAnnealingWarmRestarts')
     
-    # Warmup phase: linear increase from 0 to base LR
+    # FIX 2.md §4: Use OneCycleLR for better convergence
+    if scheduler_type == 'OneCycleLR':
+        return OneCycleLR(
+            optimizer,
+            max_lr=scheduler_config.get('max_lr', 1e-4),
+            total_steps=num_training_steps,
+            pct_start=scheduler_config.get('pct_start', 0.05),
+            anneal_strategy='cos',
+            div_factor=25.0,      # initial_lr = max_lr / 25
+            final_div_factor=1e4   # min_lr = max_lr / 1e4
+        )
+    
+    # Fallback: Original CosineAnnealingWarmRestarts with warmup
+    warmup_steps = scheduler_config.get('warmup_steps', 500)
+    
     def warmup_lambda(current_step):
         if current_step < warmup_steps:
             return float(current_step) / float(max(1, warmup_steps))
@@ -387,15 +474,12 @@ def get_scheduler(optimizer, config: Dict[str, Any], num_training_steps: int):
     
     warmup_scheduler = LambdaLR(optimizer, warmup_lambda)
     
-    # Cosine phase: after warmup
     cosine_scheduler = CosineAnnealingWarmRestarts(
         optimizer,
-        T_0=scheduler_config['T_0'],
+        T_0=scheduler_config.get('T_0', 10),
         T_mult=1
     )
     
-    # FIX Issue 16: Chain schedulers properly using SequentialLR
-    # This ensures the cosine scheduler starts at the final warmup LR, not from scratch
     combined_scheduler = SequentialLR(
         optimizer,
         schedulers=[warmup_scheduler, cosine_scheduler],

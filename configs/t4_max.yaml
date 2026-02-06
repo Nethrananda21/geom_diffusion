@@ -68,9 +68,9 @@ diffusion:
     scale: 2.0
 
 training:
-  batch_size: 8 # 8x larger!
-  gradient_accumulation_steps: 2 # Effective batch 16
-  max_epochs: 100
+  batch_size: 16 # FIX 2.md: Up from 8
+  gradient_accumulation_steps: 4 # Effective batch 64
+  max_epochs: 300 # Extended training
 
   optimizer:
     type: "AdamW"
@@ -79,14 +79,15 @@ training:
     betas: [0.9, 0.999]
 
   scheduler:
-    type: "CosineAnnealingWarmRestarts"
-    warmup_steps: 500
-    T_0: 10
+    type: "OneCycleLR" # FIX 2.md: Better convergence
+    max_lr: 1.0e-4
+    pct_start: 0.05
 
   loss:
     lambda_pos: 1.0
-    lambda_type: 0.5
+    lambda_type: 0.5 # Now uses cross-entropy
     lambda_bond: 0.1
+    lambda_connectivity: 0.5 # FIX 2.md: Penalize isolated atoms
 
   stability:
     clip_norm: 1.0
