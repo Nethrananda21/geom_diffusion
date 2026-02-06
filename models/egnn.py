@@ -346,10 +346,7 @@ class EGNN(nn.Module):
         
         h = h + t_emb_per_node
         
-        # Store initial coordinates for reference (but NOT for residual output)
-        x_init = x.clone()
-        
-        # Process through layers
+        # Process through layers (coordinates updated by EGNN layers)
         for i, (layer, ln) in enumerate(zip(self.layers, self.layer_norms)):
             h_new, x = layer(h, x, edge_index, edge_attr)
             h = ln(h_new)
